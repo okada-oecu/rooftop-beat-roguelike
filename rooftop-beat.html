@@ -140,6 +140,32 @@ kbd{font:700 11px var(--mono);padding:2px 6px;border-radius:4px;border:1px solid
 #pad button{position:absolute;left:0;top:0;transform:translate(-50%,-50%);pointer-events:auto;width:var(--pad-size,64px);height:var(--pad-size,64px);border-radius:50%;border:2px solid currentColor;background:rgba(18,11,32,.55);font:700 calc(var(--pad-size,64px) * .38) var(--mono);touch-action:none;user-select:none;-webkit-user-select:none}
 #pad [data-dir=up]{color:var(--amber)} #pad [data-dir=down]{color:var(--lilac)} #pad [data-dir=right]{color:var(--lime)} #pad [data-dir=left]{color:#ff8ad8}
 #pad button.on{background:currentColor}
+/* roguelike run: the menu card, the between-areas reward dialog and the run line on the results */
+.stage.run{grid-column:1/-1;border-color:rgba(95,225,217,.5);background:linear-gradient(100deg,rgba(95,225,217,.1),rgba(199,166,255,.08))}
+.stage.run:hover{border-color:var(--teal);background:linear-gradient(100deg,rgba(95,225,217,.18),rgba(199,166,255,.12))}
+.stage.run .bpm{color:var(--teal)}
+#runDlg{z-index:6;background:rgba(10,6,18,.55)}
+#runDlg .panel{max-width:640px}
+.run-stat{display:flex;gap:14px;flex-wrap:wrap;font:700 13px var(--mono);color:var(--muted)}
+.run-stat b{color:var(--ink)}
+.run-stat .hp{color:var(--danger,#ff5d73);letter-spacing:.1em}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+.card{all:unset;cursor:pointer;display:flex;flex-direction:column;gap:6px;padding:14px;border-radius:5px;border:1px solid rgba(255,244,230,.18);background:rgba(255,244,230,.04);min-width:0;box-sizing:border-box}
+.card:hover{border-color:var(--teal);background:rgba(95,225,217,.08)}
+.card:focus-visible{outline:2px solid var(--teal);outline-offset:2px}
+.card[disabled]{opacity:.4;cursor:not-allowed}
+.card.rare{border-color:rgba(255,181,71,.55)}
+.card .ico{font:400 28px/1 var(--display);color:var(--teal)}
+.card.rare .ico{color:var(--amber)}
+.card b{font-size:15px}
+.card span{font-size:12px;color:var(--muted);line-height:1.5}
+.card .price{font:700 13px var(--mono);color:var(--amber)}
+.card.sold{opacity:.4;cursor:default}
+@media (pointer:coarse){ .card .mono{display:none} }
+.run-sum{display:grid;gap:8px}
+.run-sum[hidden],.cards:empty,.relics:empty{display:none}
+.relics{display:flex;gap:6px;flex-wrap:wrap}
+.relics i{font-style:normal;font:700 11px var(--mono);padding:3px 7px;border-radius:3px;background:rgba(95,225,217,.14);color:var(--teal)}
 </style>
 
 <canvas id="c" aria-label="ゲーム画面" tabindex="-1"></canvas>
@@ -278,6 +304,7 @@ kbd{font:700 11px var(--mono);padding:2px 6px;border-radius:4px;border:1px solid
     <p class="eyebrow" id="overStage">STAGE</p>
     <h2 id="overTitle">踏み外した</h2>
     <p class="cause" id="overCause"></p>
+    <div id="overRun" class="run-sum" hidden><div class="run-stat" id="overRunStat"></div><div class="relics" id="overRelics"></div></div>
     <p class="newbest" id="newBest" hidden>NEW BEST</p>
     <div class="stats">
       <div class="stat"><b id="sScore">0</b><span>SCORE</span></div>
@@ -303,6 +330,18 @@ kbd{font:700 11px var(--mono);padding:2px 6px;border-radius:4px;border:1px solid
       <button class="btn" id="pauseSet">設定</button>
       <button class="btn" id="quit">ステージ選択</button>
     </div>
+  </div>
+</div>
+
+<div id="runDlg" class="overlay" hidden>
+  <div class="panel">
+    <p class="eyebrow" id="runEyebrow">AREA CLEAR</p>
+    <h2 id="runTitle" style="font-size:30px"></h2>
+    <p class="lede" id="runText"></p>
+    <div class="run-stat" id="runStat"></div>
+    <div class="cards" id="runCards"></div>
+    <div class="relics" id="runRelics"></div>
+    <div class="row"><button class="btn" id="runGo">先へ進む</button></div>
   </div>
 </div>
 
@@ -476,6 +515,43 @@ const STAGES = [
   { id:'neon', jp:'ネオン街',     bpm:128, diff:0.3,  desc:'8分の連続ジャンプと配管が増える' },
   { id:'sky',  jp:'摩天楼',       bpm:150, diff:0.55, desc:'速い。壁キックと溜めが頻繁に' },
 ];
+/* ---------------- roguelike run ----------------
+   A run is RUN_AREAS areas of generated rooftops. Between areas you land on a long "分かれ道" rooftop:
+   first the reward of the route you just ran (relic / shop / heal), then ↑ or ↓ picks the next route
+   (↑ = the harder of the two, ↓ = the easier). A miss costs a heart and throws you onto a later rooftop;
+   at zero hearts the run is over. The tempo and the backdrop change with every area. */
+const RUN_AREAS = 6;
+const RUN_BPM = [108, 116, 124, 132, 140, 150];
+const RUN_THEMES = ['dusk', 'night', 'rain', 'snow', 'sakura', 'dawn'];
+const JUNCTION_LEN = 12;        // beats on the fork rooftop; the choice closes 3 beats before its jump
+const ROUTES = {
+  start:  { id:'start',  jp:'スタート',   desc:'',                                   diff:0,     len:12, coin:1,    reward:'relic', w:0 },
+  sky:    { id:'sky',    jp:'高層ルート', desc:'難しい・コイン2倍・レリックを選ぶ',   diff:0.25,  len:14, coin:2,    reward:'relic', w:3 },
+  vault:  { id:'vault',  jp:'宝物庫',     desc:'やや難しい・レリックを選ぶ',         diff:0.1,   len:14, coin:1,    reward:'relic', w:2 },
+  market: { id:'market', jp:'闇市',       desc:'ふつう・コイン1.5倍・ゴールで買い物', diff:0,     len:14, coin:1.5,  reward:'shop',  w:2 },
+  alley:  { id:'alley',  jp:'裏路地',     desc:'やさしい・ハート1回復',               diff:-0.2,  len:12, coin:1,    reward:'heal',  w:2 },
+  trial:  { id:'trial',  jp:'試練の塔',   desc:'とても難しい・レアレリック＋コイン25', diff:0.4,   len:12, coin:2,    reward:'elite', w:1 },
+  rest:   { id:'rest',   jp:'休憩所',     desc:'とてもやさしい・短い・ハート2回復',   diff:-0.35, len:8,  coin:0.5,  reward:'rest',  w:1 },
+  // the last fork: the run ends after this area, so the choice is about the clear bonus
+  summit: { id:'summit', jp:'摩天楼の頂', desc:'とても難しい・長い・クリアボーナス2倍', diff:0.3,  len:18, coin:2,    reward:'final', bonus:2, w:0 },
+  stairs: { id:'stairs', jp:'非常階段',   desc:'ふつう・クリアボーナスそのまま',       diff:0,     len:14, coin:1,    reward:'final', bonus:1, w:0 },
+};
+const RELICS = [
+  { id:'heart',  ico:'♥', jp:'予備のハート',   desc:'ハートの上限+1、1つ回復',                        stack:true },
+  { id:'lens',   ico:'◎', jp:'広角レンズ',     desc:'判定の幅が20%広がる' },
+  { id:'boots',  ico:'¥', jp:'金のスニーカー', desc:'もらえるコイン+50%' },
+  { id:'charm',  ico:'守', jp:'お守り',         desc:'EARLY・TOO SHORT などでコンボとフローが切れない' },
+  { id:'metro',  ico:'♪', jp:'メトロノーム',   desc:'PERFECT 5回でFLOWに入る（ふつうは8回）' },
+  { id:'groove', ico:'≈', jp:'グルーヴ',       desc:'GREATでもFLOWゲージが溜まる' },
+  { id:'tip',    ico:'＄', jp:'投げ銭',         desc:'FLOW中はコイン2倍' },
+  { id:'helmet', ico:'盾', jp:'ヘルメット',     desc:'配管に激突してもハートが減らない（エリアごとに1回）' },
+  { id:'crown',  ico:'♛', jp:'王冠',           desc:'スコア+30%',                                     rare:true },
+  { id:'pulse',  ico:'♡', jp:'鼓動',           desc:'50コンボごとにハートが1回復',                    rare:true },
+  { id:'phoenix',ico:'鳳', jp:'不死鳥の羽',     desc:'ハートが尽きても1度だけハート2で復活',           rare:true },
+];
+const relicOf = id => RELICS.find(r => r.id === id);
+const hasRelic = (g, id) => !!(g && g.run && g.run.relics.includes(id));
+const WIN_BASE = { ...WIN };
 const PROG = [ {root:57,tri:[0,3,7]}, {root:53,tri:[0,4,7]}, {root:48,tri:[0,4,7]}, {root:55,tri:[0,4,7]} ];
 const HINTS = {
   up:'白い輪にノーツが重なった瞬間に ↑',
@@ -648,7 +724,7 @@ function addNote(g, seg, n){
 }
 function pushSeg(g, seg){
   g.segs.push(seg);
-  if (seg.goal) { seg.jn = { type:'up', done:true }; return; }
+  if (seg.goal || seg.junction) { seg.jn = { type:'up', done:true }; return; }   // a fork gets its jump note once a route is picked
   if (seg.slide != null) addNote(g, seg, seg.slideTo != null ? { type:'dhold', s:seg.slide, t:seg.slideTo } : { type:'down', s:seg.slide, t:seg.slide });
   if (seg.kind === 'hold') addNote(g, seg, { type:'hold', s:seg.T - seg.h, t:seg.T });
   else addNote(g, seg, { type:'up', s:seg.T, t:seg.T });
@@ -659,14 +735,17 @@ function genSeg(g){
   const r = g.rng, segs = g.segs, prev = segs[segs.length - 1], n = segs.length;
   const L = prev.shaft ? prev.shaft.land : prev.T + prev.air + (prev.kind === 'wall' ? KICK : 0);
   const ox = prev.shaft ? prev.shaft.oxNext : prev.ox || 0, faceX = prev.shaft ? prev.shaft.xR : null;
-  const song = g.stage.song, e = song ? songEnergy(song, L) : 0;
-  const d = song ? clamp((e - 0.55) / 0.35, 0, 1) * song.maxD : Math.min(1, g.stage.diff + n / 140);
+  const song = g.stage.song, e = song ? songEnergy(song, L) : 0, run = g.run;
+  const d = song ? clamp((e - 0.55) / 0.35, 0, 1) * song.maxD
+    : run ? clamp(0.04 + (run.area - 1) * 0.13 + run.route.diff + (n - run.areaStart) / Math.max(1, run.areaLen) * 0.06, 0, 1)
+    : Math.min(1, g.stage.diff + n / 140);
   const calm = song && e < 0.56;
   const drop = song ? song.drops.find(D => D - L >= 1.5 && D - L <= 3.5) : undefined;
   const preDrop = song ? song.drops.find(D => D - L > 3.5 && D - L <= 6.5) : undefined;
   let y, face = null;
   if (prev.kind === 'wall') { y = prev.y - WALL_H; face = prev.T + prev.air; }
   else if (prev.shaft) y = prev.shaft.landY;
+  else if (prev.junction) y = clamp(prev.y + (prev.routeUp ? -90 : 80), -400, 220);   // ↑ climbs to the high route, ↓ drops to the low one
   else {
     let dy = prev.air <= 0.5 ? pick(r, [-30, 0, 30]) : prev.kind === 'hold' ? pick(r, [-110, -60, 0, 60]) : pick(r, [-70, -40, 0, 0, 40, 70]);
     if (prev.y < -60 && prev.air > 0.5) dy = Math.min(Math.abs(dy), 40) + 15;   // drift back down after climbs, gently, so walls keep appearing
@@ -675,6 +754,15 @@ function genSeg(g){
   }
   if (song && L >= song.endBeat - 6) {   // finish line: one long rooftop to run out the song on
     pushSeg(g, { L, T: L + 400, y, kind:'tap', h:0, air:1, idx:n, slide:null, face, faceX, ox, goal:true });
+    return;
+  }
+  if (run && n - run.areaStart >= run.areaLen) {
+    if (run.area >= run.areas) pushSeg(g, { L, T: L + 400, y, kind:'tap', h:0, air:1, idx:n, slide:null, face, faceX, ox, goal:true });
+    else pushSeg(g, { L, T: L + JUNCTION_LEN, y, kind:'tap', h:0, air:1, idx:n, slide:null, face, faceX, ox, junction:{ opts:run.area + 1 >= run.areas ? [ROUTES.summit, ROUTES.stairs] : routeOptions(r) } });
+    return;
+  }
+  if (prev.junction) {   // first rooftop of a route: plain and roomy, so its notes can be read after the late reveal
+    pushSeg(g, { L, T: L + 2, y, kind:'tap', h:0, air:1, idx:n, slide:null, face, faceX, ox });
     return;
   }
   const pWall = (!calm && n >= 6 && prev.kind === 'tap' && y >= -30) ? 0.12 + 0.1 * d : 0;
@@ -717,7 +805,20 @@ function genSeg(g){
   }
   pushSeg(g, { L, T: L + ground, y, kind, h, air, idx: n, slide, slideTo, face, faceX, ox });
 }
-function ensureChart(g, b){ if (g.stage.chart) return; while (g.segs[g.segs.length - 1].T < b + 40) genSeg(g); }
+function ensureChart(g, b){
+  if (g.stage.chart) return;
+  for (;;) {
+    const last = g.segs[g.segs.length - 1];
+    if (last.T >= b + 40 || (last.junction && !last.route)) return;   // nothing past a fork until a route is picked
+    genSeg(g);
+  }
+}
+// two different routes for a fork, by weight; the harder one is offered on ↑ (the high road), the easier on ↓
+function routeOptions(r){
+  const pool = Object.values(ROUTES).filter(x => x.w > 0), pickW = list => { let t = r() * list.reduce((s, x) => s + x.w, 0); return list.find(x => (t -= x.w) < 0) || list[0]; };
+  const a = pickW(pool), b = pickW(pool.filter(x => x !== a));
+  return a.diff >= b.diff ? [a, b] : [b, a];
+}
 
 /* ANALYZER START */
 // Song analysis for imported tracks: spectral-flux onsets → tempo (autocorrelation + comb fit) → first-beat phase → per-bar loudness
@@ -797,8 +898,10 @@ function makeGame(stage, demo){
     cur:0, mode:'ground', arc:null, x:0, y:0, vx:0, vy:0, beat:0, chargeAt:0, slideEnd:0, fallT:0, kickQueued:false,
     score:0, combo:0, maxCombo:0, cleared:0, counts:{ PERFECT:0, GREAT:0, GOOD:0, STUMBLE:0 },
     parts:[], pops:[], camX:-VW * 0.28, camY:-VH * 0.58, shake:0, running:true, step:0, cueIdx:0,
-    rng: mulberry32(stage.seed != null ? stage.seed : demo ? 20261016 : (Math.random() * 1e9) | 0), ended:false, cause:''
+    rng: mulberry32(stage.seed != null ? stage.seed : demo ? 20261016 : (Math.random() * 1e9) | 0), ended:false, cause:'',
+    run: !demo && stage.run || null
   };
+  if (g.run) { g.counts.MISS = 0; runTheme(g); }
   if (stage.chart) { const c = buildChart(stage.chart, stage.seed); g.segs = c.segs; g.notes = c.notes; }
   else { pushSeg(g, { L:-60, T:8, y:0, kind:'tap', h:0, air:1, idx:0, slide:null, face:null, ox:0 }); ensureChart(g, 0); }
   g.ox = 0;
@@ -813,7 +916,8 @@ function pop(g, text, color){ g.pops.push({ text, color, x:g.x, y:g.y - 70, t:0 
 function judge(g, gr, weight){
   if (g.demo) return;
   g.counts[gr]++; g.combo++; g.maxCombo = Math.max(g.maxCombo, g.combo);
-  g.score += Math.round({ PERFECT:300, GREAT:200, GOOD:100 }[gr] * weight * (1 + Math.min(g.combo, 100) / 50));
+  g.score += Math.round({ PERFECT:300, GREAT:200, GOOD:100 }[gr] * weight * (1 + Math.min(g.combo, 100) / 50) * (hasRelic(g, 'crown') ? 1.3 : 1));
+  if (g.run) runJudge(g, gr, weight);
   pop(g, gr, GRADE_COLOR[gr]);
   laneFx(g, gr, GRADE_COLOR[gr], LAST_SEC);
   if (gr !== 'GOOD') sfx(gr === 'PERFECT' ? 'perfect' : 'great');
@@ -821,12 +925,13 @@ function judge(g, gr, weight){
   if (COMBO_MARKS.includes(g.combo) || (g.combo > 500 && g.combo % 100 === 0)) comboMilestone(g);
   if (SET.dopa) dopaHit(g, gr);
   // flow: 8 PERFECTs in a row fill the gauge; GREAT/GOOD keep it, any miss empties it
-  if (gr === 'PERFECT' && !g.flowOn) {
-    g.flow = Math.min(1, g.flow + FLOW_STEP);
+  if ((gr === 'PERFECT' || (gr === 'GREAT' && hasRelic(g, 'groove'))) && !g.flowOn) {
+    g.flow = Math.min(1, g.flow + flowStep(g) + 1e-9);
     if (g.flow >= 1) { g.flowOn = true; g.pops.push({ text:'FLOW', color:C.teal, x:g.x, y:g.y - 100, t:0 }); sfx('flow'); }
   }
 }
 const FLOW_STEP = 1 / 8;
+const flowStep = g => hasRelic(g, 'metro') ? 1 / 5 : FLOW_STEP;
 const COMBO_MARKS = [10, 25, 50, 75, 100, 150, 200, 300, 400, 500];
 const RAINBOW = Array.from({ length:12 }, (_, i) => `hsl(${i * 30},100%,55%)`);
 const HYPE = ['神！', 'えぐい！', '天才！', '止まらん！', '最高！', 'ヤバい！', 'キマった！', '音ハメ！', 'うますぎ！', 'ゾーン！',
@@ -905,7 +1010,12 @@ function comboMilestone(g){
 }
 function laneFx(g, label, color, sec){ (g.laneFx || (g.laneFx = [])).push({ label, color, sec, t:0 }); }
 function breakFlow(g){ if (g.demo) return; laneFx(g, 'MISS', C.danger, null); if (g.flowOn) pop(g, 'FLOW BREAK', C.muted); g.flow = 0; g.flowOn = false; }
-function stumble(g, label){ if (g.demo) return; g.combo = 0; g.counts.STUMBLE++; pop(g, label, C.danger); sfx('stumble'); breakFlow(g); }
+function stumble(g, label){
+  if (g.demo) return;
+  g.counts.STUMBLE++; pop(g, label, C.danger); sfx('stumble');
+  if (hasRelic(g, 'charm')) { laneFx(g, label, C.muted, null); return; }   // the charm keeps combo and flow
+  g.combo = 0; breakFlow(g);
+}
 function dust(g, n, color, spread, dir){
   for (let i = 0; i < n; i++) g.parts.push({ x:g.x + (Math.random() - .5) * 16, y:g.y - 2, vx:((dir || 0) + (Math.random() - .7)) * spread, vy:-Math.random() * spread * .6, life:0, max:.35 + Math.random() * .3, color, size:2 + Math.random() * 2.5 });
 }
@@ -941,6 +1051,7 @@ function startSlide(g, b, end){ g.mode = 'slide'; g.slideEnd = end; sfx('slide')
 function stopMusic(g){ if (!g.demo && bus) { bus.gain.cancelScheduledValues(actx.currentTime); bus.gain.setTargetAtTime(0.0001, actx.currentTime, 0.18); } }
 function fall(g, label, cause){
   if (g.mode === 'fall' || g.mode === 'crash') return;
+  if (g.run && runRescue(g, label || 'MISS', false)) return;
   if (g.mode === 'air' && g.arc) {
     const a = g.arc, c = a.eo ? a.y1 : 2 * (Math.min(a.y0, a.y1) - a.peak) - (a.y0 + a.y1) / 2;
     g.vy = 2 * (a.y1 - c) / (a.dur * g.spb);
@@ -952,11 +1063,168 @@ function fall(g, label, cause){
   sfx('fail'); stopMusic(g);
 }
 function crash(g){
+  if (g.run && runRescue(g, 'CRASH', true)) return;
   g.mode = 'crash'; g.vx = -160; g.vy = -380; g.fallT = 0; g.crashY = g.segs[g.cur].y; g.combo = 0; g.cause = '配管に激突'; g.failSeg = g.cur; breakFlow(g);
   pop(g, 'CRASH', C.danger); g.shake = 10; sfx('crash'); stopMusic(g);
 }
 // eo (ease-out): rise and arrive at y1 with zero vertical speed, so the wall is touched at the top of the arc, on the beat
 function bez(a, u){ if (a.eo) return a.y1 + (1 - u) * (1 - u) * (a.y0 - a.y1); const top = Math.min(a.y0, a.y1) - a.peak, c = 2 * top - (a.y0 + a.y1) / 2; return (1 - u) * (1 - u) * a.y0 + 2 * u * (1 - u) * c + u * u * a.y1; }
+
+/* ---- run (roguelike) rules ---- */
+function runTheme(g, i){ if (SET.theme === 'auto') g.theme = THEMES[RUN_THEMES[(i || 0) % RUN_THEMES.length]]; }
+function applyRunMods(g){   // relics that change the shared judgement windows; everything else checks hasRelic() where it applies
+  Object.assign(WIN, WIN_BASE);
+  if (hasRelic(g, 'lens')) for (const k in WIN) WIN[k] = WIN_BASE[k] * 1.2;
+}
+function runHeal(g, n){ const R = g.run, before = R.hearts; R.hearts = Math.min(R.maxHearts, R.hearts + n); g.hpBump = 1; return R.hearts - before; }
+function gainRelic(g, id){
+  const R = g.run; R.relics.push(id);
+  if (id === 'heart') { R.maxHearts++; runHeal(g, 1); }
+  applyRunMods(g);
+}
+function runJudge(g, gr, weight){
+  const R = g.run;
+  const v = { PERFECT:1, GREAT:0.6, GOOD:0.3 }[gr] * weight * R.route.coin * (hasRelic(g, 'boots') ? 1.5 : 1) * (g.flowOn && hasRelic(g, 'tip') ? 2 : 1);
+  R.coinF += v; const whole = Math.floor(R.coinF); R.coinF -= whole; R.coins += whole; R.earned += whole;
+  if (whole) g.coinBump = 1;
+  if (hasRelic(g, 'pulse') && g.combo % 50 === 0 && runHeal(g, 1)) g.pops.push({ text:'♥ +1', color:C.danger, x:g.x, y:g.y - 100, t:0 });
+}
+// a miss in a run: a heart takes the hit and the runner is flung onto the first rooftop it can land on with ≥1 beat to spare
+function runRescue(g, label, isCrash){
+  const R = g.run;
+  if (g.demo || g.auto || g.ended) return false;
+  g.counts.MISS++;
+  if (isCrash && hasRelic(g, 'helmet') && !R.helmetUsed) { R.helmetUsed = true; g.pops.push({ text:'ヘルメット！', color:C.teal, x:g.x, y:g.y - 100, t:0 }); }
+  else {
+    R.hearts--; g.hpBump = 1;
+    if (R.hearts <= 0) {
+      if (!hasRelic(g, 'phoenix') || R.phoenixUsed) { R.hearts = 0; return false; }
+      R.phoenixUsed = true; R.hearts = 2; g.pops.push({ text:'不死鳥！', color:C.amber, x:g.x, y:g.y - 120, t:0 });
+    }
+  }
+  const b = g.clock(); ensureChart(g, b);
+  // land on the first roof that still leaves ¾ beat before its takeoff; a pipe right at the landing spot is waved through
+  let j = g.cur + 1, landB = 0;
+  for (; j < g.segs.length; j++) {
+    const s = g.segs[j]; landB = Math.max(b + 1, s.L + 0.1);
+    if (landB <= (s.kind === 'hold' ? s.T - s.h : s.T) - 0.75) break;
+  }
+  if (j >= g.segs.length) return false;
+  for (let i = g.noteLo; i < g.notes.length; i++) {
+    const n = g.notes[i]; if (n.seg > j) break;
+    if (n.done || n.seg < g.cur) continue;
+    if (n.seg < j || ((n.type === 'down' || n.type === 'dhold') && n.s < landB + 0.5)) n.done = true;
+  }
+  g.slideHold = null; g.kickQueued = false; g.buffer = null; g.holdUntil = null; g.ki = 0;
+  g.combo = 0; breakFlow(g);
+  const to = g.segs[j];
+  g.mode = 'air';
+  g.arc = { kind:'jump', b0:b, dur:landB - b, x0:g.x, x1:landB * PPB - (to.ox || 0), y0:g.y, y1:to.y, peak:110, to:j, flip:true, rescue:true };
+  pop(g, label, C.danger);
+  g.shake = 10; g.flash = Math.max(g.flash || 0, 0.5); g.hurt = 1;
+  sfx('crash'); sfx('big'); dust(g, 18, C.danger, 220);
+  return true;
+}
+function setTempo(g, bpm){   // keep the current beat where it is and run on from it at the new tempo
+  const b = g.clock();
+  g.spb = 60 / bpm; g.stage.bpm = bpm;
+  g.startAt = actx.currentTime - latency() - b * g.spb;
+}
+function chooseRoute(g, seg, dir){
+  const R = g.run, opt = seg.junction.opts[dir === 'up' ? 0 : 1];
+  seg.route = opt; seg.routeUp = dir === 'up';
+  R.route = opt; R.area++; R.areaStart = g.segs.length; R.areaLen = opt.len; R.helmetUsed = false; R.path.push(opt.jp);
+  addNote(g, seg, { type:'up', s:seg.T, t:seg.T });
+  ensureChart(g, g.beat);
+  g.banner = { title:`AREA ${R.area}${R.area === R.areas ? ' — 最上階' : ''}`, sub:opt.jp, color:dir === 'up' ? C.amber : C.lilac, t:0 };
+  sfx('flow');
+}
+function runArrive(g, seg){
+  if (!seg.junction || seg.arrived) return;
+  seg.arrived = true;
+  const R = g.run;
+  setTempo(g, RUN_BPM[Math.min(R.area, RUN_BPM.length - 1)]);
+  runTheme(g, R.area);
+  openReward(g);
+}
+function runClearBonus(g){ const R = g.run; R.bonus = (R.hearts * 5000 + R.coins * 50) * (R.route.bonus || 1); g.score += R.bonus; }
+// relic offers: owned ones never come back (except ♥); rare ones are scarcer unless `rare` asks for one
+function rollRelics(g, k, rare){
+  const R = g.run, pool = RELICS.filter(r => r.stack || !R.relics.includes(r.id)), out = [];
+  if (rare) { const rs = pool.filter(r => r.rare); if (rs.length) out.push(rs[Math.floor(Math.random() * rs.length)]); }
+  while (out.length < k) {
+    const left = pool.filter(r => !out.includes(r)); if (!left.length) break;
+    let t = Math.random() * left.reduce((s, r) => s + (r.rare ? 1 : 3), 0);
+    out.push(left.find(r => (t -= r.rare ? 1 : 3) < 0) || left[0]);
+  }
+  return out.sort(() => Math.random() - 0.5);
+}
+let RD = null;   // the open reward dialog
+function openReward(g){
+  const R = g.run, kind = R.route.reward;
+  paused = true; actx.suspend();
+  $('pauseBtn').hidden = true; $('pad').hidden = true;
+  RD = { g, kind, offers:[], taken:false };
+  $('runEyebrow').textContent = R.route.id === 'start' ? 'AREA 1 CLEAR' : `AREA ${R.area} CLEAR · ${R.route.jp}`;
+  let title = '', text = '';
+  if (kind === 'relic' || kind === 'elite') {
+    if (kind === 'elite') { R.coins += 25; text = '試練を越えた。コイン +25。'; }
+    title = 'レリックを1つ選ぶ';
+    text += R.route.id === 'start' ? 'レリックはこのラン中ずっと効く強化です。' : '';
+    RD.offers = rollRelics(g, 3, kind === 'elite').map(r => ({ relic:r, price:0 }));
+  } else if (kind === 'shop') {
+    title = '闇市'; text = 'コインでレリックやハートを買える。';
+    RD.offers = rollRelics(g, 3, false).map(r => ({ relic:r, price:r.rare ? 70 : 40 }));
+    RD.offers.push({ heal:1, price:25 });
+  } else if (kind === 'heal' || kind === 'rest') {
+    const n = runHeal(g, kind === 'rest' ? 2 : 1);
+    title = kind === 'rest' ? 'ゆっくり休んだ' : 'ひと息ついた';
+    text = n ? `ハートが${n}回復した。` : 'ハートは満タン。かわりにコイン +10。';
+    if (!n) R.coins += 10;
+  }
+  text += ' この屋上で道が分かれる。進んだら ↑ で上のルート、↓ で下のルートを選ぶ。';
+  $('runTitle').textContent = title; $('runText').textContent = text;
+  renderReward();
+  $('runDlg').hidden = false;
+  const first = $('runCards').querySelector('.card:not([disabled])');
+  (first || $('runGo')).focus();
+}
+function renderReward(){
+  const g = RD.g, R = g.run;
+  $('runStat').innerHTML = `<span class="hp">${'♥'.repeat(R.hearts)}${'♡'.repeat(Math.max(0, R.maxHearts - R.hearts))}</span><span>コイン <b>${R.coins}</b></span><span>次 <b>${RUN_BPM[Math.min(R.area, RUN_BPM.length - 1)]} BPM</b></span>`;
+  $('runCards').innerHTML = RD.offers.map((o, i) => {
+    const sold = o.sold, cant = o.price > R.coins || (o.heal && R.hearts >= R.maxHearts), dis = sold || (RD.kind !== 'shop' && RD.taken) || (RD.kind === 'shop' && cant);
+    const ico = o.heal ? '♥' : o.relic.ico, name = o.heal ? 'ハート回復' : o.relic.jp, desc = o.heal ? 'ハートを1つ回復する' : o.relic.desc;
+    return `<button class="card${o.relic && o.relic.rare ? ' rare' : ''}${sold ? ' sold' : ''}" data-i="${i}"${dis ? ' disabled' : ''}><span class="ico">${ico}</span><b>${name}${o.relic && o.relic.rare ? ' <small style="color:var(--amber)">RARE</small>' : ''}</b><span>${desc}</span>${o.price ? `<span class="price">${sold ? '購入済み' : '◎ ' + o.price}</span>` : ''}<span class="mono">[${i + 1}]</span></button>`;
+  }).join('');
+  $('runRelics').innerHTML = R.relics.map(id => { const r = relicOf(id); return `<i title="${r.desc}">${r.ico} ${r.jp}</i>`; }).join('');
+  $('runGo').textContent = (RD.kind === 'relic' || RD.kind === 'elite') && !RD.taken ? '選ばずに進む' : '先へ進む';
+}
+function takeOffer(i){
+  if (!RD) return;
+  const o = RD.offers[i], g = RD.g, R = g.run;
+  if (!o || o.sold) return;
+  if (RD.kind === 'shop') {
+    if (o.price > R.coins || (o.heal && R.hearts >= R.maxHearts)) return;
+    R.coins -= o.price; o.sold = true;
+    if (o.heal) runHeal(g, 1); else gainRelic(g, o.relic.id);
+    sfx('great'); renderReward();
+    const nx = $('runCards').querySelector('.card:not([disabled])'); (nx || $('runGo')).focus();
+  } else {
+    if (RD.taken) return;
+    RD.taken = true; o.sold = true; gainRelic(g, o.relic.id); sfx('combo');
+    closeReward();
+  }
+}
+function closeReward(){
+  if (!RD) return;
+  RD = null;
+  $('runDlg').hidden = true;
+  if (!G || G.demo || !G.running) return;
+  paused = false; actx.resume();
+  $('pauseBtn').hidden = false; $('pad').hidden = !padVisible();
+  cv.focus();
+}
 
 function press(dir){
   const g = G; if (!g || g.demo || g.auto || !g.running || paused) return;
@@ -964,10 +1232,12 @@ function press(dir){
 }
 function pressAt(g, dir, b){
   const seg = g.segs[g.cur], wB = wBeats(g);
+  // on a fork rooftop, ↑ / ↓ pick the next route (no judgement; the jump note appears once chosen)
+  if (g.run && seg.junction && !seg.route && g.mode === 'ground' && (dir === 'up' || dir === 'down')) { chooseRoute(g, seg, dir); return; }
   // pressed in the air just before landing: if it is within the next roof's note window, keep it for the landing
   if ((dir === 'up' || dir === 'down') && g.mode === 'air' && g.arc.kind === 'jump') {
     const nx = g.segs[g.arc.to];
-    const tgt = dir === 'down' ? (nx.dn && !nx.dn.done ? nx.dn.s : null) : nx.goal ? null : nx.kind === 'hold' ? nx.T - nx.h : nx.T;
+    const tgt = dir === 'down' ? (nx.dn && !nx.dn.done ? nx.dn.s : null) : nx.goal || nx.junction ? null : nx.kind === 'hold' ? nx.T - nx.h : nx.T;
     if (tgt != null && Math.abs(b - tgt) * g.spb <= WIN.good) g.buffer = { dir, b };
     else playEmpty();
     return;
@@ -1105,6 +1375,7 @@ function update(g, dt){
       if (g.buffer) { const bf = g.buffer; g.buffer = null; pressAt(g, bf.dir, bf.b); if (bf.rel != null && g.mode === 'charge') releaseAt(g, bf.rel); if (bf.rel != null && bf.dir === 'down') releaseDownAt(g, bf.rel); }
       sfx('land'); dust(g, a.flip || a.kick ? 14 : 6, C.ink, a.flip ? 200 : 90);
       if (a.flip) g.shake = 6;
+      if (g.run) runArrive(g, g.segs[g.cur]);
     } else if (a.kind === 'towall') {
       g.y = a.y1;
       if (g.kickQueued) wallKick(g); else { g.mode = 'wall'; dust(g, 6, C.lime, 80, -1); }
@@ -1131,8 +1402,10 @@ function update(g, dt){
   }
   if (G !== g) return;
   if (g.stage.song && !g.ended && g.mode === 'ground' && seg.goal && b >= Math.max(seg.L + 2, g.stage.song.endBeat)) { g.cleared++; g.clear = true; gameOver(g); }
+  if (g.run && !g.ended && g.mode === 'ground' && seg.goal && b >= seg.L + 3) { g.clear = true; runClearBonus(g); gameOver(g); return; }
+  if (g.run && seg.junction && !seg.route && g.mode === 'ground' && b >= seg.T - 3) chooseRoute(g, seg, 'down');   // no pick in time: the easier road
   // camera: follows the runner; inside a wall-jump shaft it holds on the shaft and eases in/out
-  const shaftNow = !!(seg.shaft && (inShaftFlight(g) || (g.mode === 'air' && g.arc.x0 != null)));
+  const shaftNow = !!(seg.shaft && (inShaftFlight(g) || (g.mode === 'air' && g.arc.x0 != null && !g.arc.rescue)));
   if (shaftNow !== !!g.wasShaft) { g.camEase = 0.6; g.wasShaft = shaftNow; }
   const camT = shaftNow ? (seg.shaft.xL + seg.shaft.xR) / 2 - VW * 0.4 : g.x - VW * 0.28;
   g.camEase = Math.max(0, (g.camEase || 0) - dt);
@@ -1147,6 +1420,10 @@ function update(g, dt){
   g.shake = Math.max(0, g.shake - dt * 30);
   g.squash = Math.max(0, g.squash - dt * 6);
   g.comboBump = Math.max(0, (g.comboBump || 0) - dt * 5);
+  if (g.run) {
+    g.coinBump = Math.max(0, (g.coinBump || 0) - dt * 6); g.hpBump = Math.max(0, (g.hpBump || 0) - dt * 3); g.hurt = Math.max(0, (g.hurt || 0) - dt * 1.2);
+    if (g.banner) g.banner.t += dt;
+  }
   g.flash = Math.max(0, (g.flash || 0) - dt * 2.5);
   if (g.comboPop) { g.comboPop.t += dt; if (g.comboPop.t > 1.2) g.comboPop = null; }
   // speed lines (screen space): density and alpha rise with tempo and flow
@@ -1314,9 +1591,29 @@ function drawPlatforms(g){
     }
     const tx = s.T * PPB - o - g.camX;
     ctx.fillStyle = edge; ctx.fillRect(tx - 1, top - 14, 2, 14);
+    if (s.junction) drawFork(g, s, top, pulse);
   }
   // wall-jump shafts go on top so their kick marks sit over the building faces
   for (let i = Math.max(0, g.cur - 3); i < g.segs.length; i++) { const s = g.segs[i]; if (s.shaft) drawShaft(g, s, pulse); }
+}
+// fork rooftop: a small two-armed signpost (↑ high road on the upper plate, ↓ low road on the lower one);
+// the full descriptions are on the HUD cards. Once a route is picked the other plate fades out.
+function drawFork(g, s, top, pulse){
+  const o = s.ox || 0, [hi, lo] = s.junction.opts, picked = s.route;
+  const px = (s.L + 1.8) * PPB - o - g.camX;
+  if (px < -200 || px > VW + 20) return;
+  ctx.save();
+  ctx.fillStyle = V('#3a2d4a'); ctx.fillRect(px - 2, top - 128, 4, 128);
+  const plate = (r, y, dir, col) => {
+    ctx.globalAlpha = !picked || r === picked ? 1 : 0.25;
+    roundRect(px - 4, y - 14, 136, 28, 5); ctx.fillStyle = 'rgba(18,11,32,.92)'; ctx.fill();
+    ctx.lineWidth = picked === r ? 3 : 1.5; ctx.strokeStyle = col; ctx.globalAlpha *= picked === r ? 1 : 0.7 + 0.3 * pulse; ctx.stroke();
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(px + 11, y, 9, 0, Math.PI * 2); ctx.fill(); arrow(px + 11, y, dir, 4.5, C.dark);
+    ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = '400 13px "Dela Gothic One", sans-serif'; ctx.fillText(r.jp, px + 26, y + 5);
+  };
+  plate(hi, top - 112, 'up', C.amber);
+  plate(lo, top - 76, 'down', C.lilac);
+  ctx.restore();
 }
 function drawShaft(g, s, pulse){
   const sh = s.shaft, xR = sh.xR - g.camX;
@@ -1644,7 +1941,7 @@ function drawHUD(g){
   ctx.fillStyle = C.muted; ctx.font = '500 12px "Zen Kaku Gothic New", sans-serif';
   ctx.fillText(`${g.stage.jp} · ${Math.round(g.stage.bpm)} BPM · 屋上 ${g.cleared}`, 16, top + 60);
   { // flow gauge: one notch per PERFECT
-    const gx = 16, gy = top + 70, gw = 150, n = Math.round(1 / FLOW_STEP), on = g.flowOn, pulseF = REDUCED ? 0 : Math.exp(-frac(b) * 5);
+    const gx = 16, gy = top + 70, gw = 150, n = Math.round(1 / flowStep(g)), on = g.flowOn, pulseF = REDUCED ? 0 : Math.exp(-frac(b) * 5);
     for (let i = 0; i < n; i++) {
       const filled = on || i < Math.round(g.flow * n);
       ctx.fillStyle = filled ? (on ? (i % 2 ? C.amber : C.teal) : C.teal) : 'rgba(255,244,230,.12)';
@@ -1667,6 +1964,7 @@ function drawHUD(g){
     ctx.fillStyle = SET.dopa ? `hsl(${(performance.now() / 5) % 360},95%,65%)` : g.combo >= 50 ? C.teal : C.amber; ctx.font = `400 ${SET.dopa ? 48 : 36}px "Dela Gothic One", sans-serif`;
     ctx.fillText(g.combo, 0, 12); ctx.restore(); ctx.fillStyle = C.muted; ctx.font = '700 11px "JetBrains Mono", monospace'; ctx.fillText('COMBO', W / 2, top + 52);
   }
+  if (g.run) drawRunHUD(g);
   const cd = b - (g.firstBeat - 4);   // 3-2-1-GO over the four beats before the first note
   if (cd >= 0 && cd < 4) {
     const n = Math.floor(cd) + 4;
@@ -1674,6 +1972,7 @@ function drawHUD(g){
   }
   // first two of each note type get a one-line explanation as they approach
   if (g.mode === 'fall' || g.mode === 'crash') return;
+  if (g.run && g.segs[g.cur].junction && !g.segs[g.cur].route && g.mode === 'ground') { drawForkPrompt(g, g.segs[g.cur]); return; }
   for (let i = g.noteLo; i < g.notes.length; i++) {
     const n = g.notes[i]; if (n.s - b > 4) break;
     if (n.done || n.nth > 2) continue;
@@ -1681,6 +1980,70 @@ function drawHUD(g){
     ctx.fillText(g.segs[n.seg] && g.segs[n.seg].shaft && n.type !== 'up' ? HINTS.shaft : n.type === 'up' && SET.chartView === 'world' ? '縮んでくる輪がノーツに重なった瞬間に ↑' : HINTS[n.type], W / 2, top + 96);
     break;
   }
+}
+
+// run HUD, top right (left of the pause button): hearts, coins, area · route, then the relics owned
+function drawRunHUD(g){
+  const R = g.run, rx = W - 68, now = performance.now() / 1000;
+  ctx.save(); ctx.textAlign = 'right';
+  const hb = 1 + 0.4 * (g.hpBump || 0), blink = (g.hurt || 0) > 0 && Math.floor(now * 16) % 2;
+  for (let i = 0; i < R.maxHearts; i++) {   // drawn hearts (the ♥ glyph turns into an emoji on some systems)
+    const step = W < 500 && R.maxHearts > 4 ? 16 : 22, s = (step < 22 ? 6.5 : 8) * hb, cy = 30, full = i < R.hearts, x = rx - (R.maxHearts - 1 - i) * step - s;
+    ctx.beginPath(); ctx.moveTo(x, cy + s * 0.9);
+    ctx.bezierCurveTo(x - s * 1.3, cy, x - s * 0.9, cy - s * 0.95, x, cy - s * 0.3);
+    ctx.bezierCurveTo(x + s * 0.9, cy - s * 0.95, x + s * 1.3, cy, x, cy + s * 0.9); ctx.closePath();
+    if (full) { ctx.fillStyle = blink ? C.ink : C.danger; ctx.fill(); }
+    else { ctx.strokeStyle = 'rgba(255,93,115,.55)'; ctx.lineWidth = 1.6; ctx.stroke(); }
+  }
+  ctx.font = `700 ${Math.round(14 * (1 + 0.25 * (g.coinBump || 0)))}px "JetBrains Mono", monospace`; ctx.fillStyle = C.amber;
+  ctx.fillText(`◎ ${R.coins}`, rx, 60);
+  ctx.font = '700 11px "JetBrains Mono", monospace'; ctx.fillStyle = C.muted;
+  ctx.fillText(`AREA ${R.area}/${R.areas} · ${R.route.jp}`, W - 16, 80);
+  if (R.relics.length && W >= 640) {   // narrow screens: the flow gauge's label needs that row
+    ctx.font = '700 11px "Zen Kaku Gothic New", sans-serif';
+    let x = W - 16;
+    for (let i = R.relics.length - 1; i >= 0 && x > W * 0.55; i--) {
+      const r = relicOf(R.relics[i]), w = ctx.measureText(r.ico).width + 10;
+      roundRect(x - w, 88, w, 18, 3); ctx.fillStyle = r.rare ? 'rgba(255,181,71,.22)' : 'rgba(95,225,217,.18)'; ctx.fill();
+      ctx.fillStyle = r.rare ? C.amber : C.teal; ctx.textAlign = 'center'; ctx.fillText(r.ico, x - w / 2, 101);
+      x -= w + 4;
+    }
+  }
+  ctx.restore();
+  if (g.banner) {   // "AREA 3 — 高層ルート" after picking a route
+    const k = g.banner.t / 2.2;
+    if (k >= 1) g.banner = null;
+    else {
+      const sc = 1 + 0.4 * Math.pow(1 - Math.min(1, k * 4), 3);
+      ctx.save(); ctx.globalAlpha = k > 0.75 ? (1 - k) / 0.25 : 1; ctx.translate(W / 2, H * 0.3); ctx.scale(sc, sc); ctx.textAlign = 'center';
+      ctx.font = `400 ${Math.round(Math.min(56, W * 0.11))}px "Dela Gothic One", sans-serif`;
+      ctx.lineWidth = 6; ctx.strokeStyle = 'rgba(18,11,32,.85)'; ctx.strokeText(g.banner.title, 0, 0); ctx.fillStyle = C.ink; ctx.fillText(g.banner.title, 0, 0);
+      ctx.font = `400 ${Math.round(Math.min(26, W * 0.06))}px "Dela Gothic One", sans-serif`;
+      ctx.strokeText(g.banner.sub, 0, 40); ctx.fillStyle = g.banner.color; ctx.fillText(g.banner.sub, 0, 40);
+      ctx.restore();
+    }
+  }
+}
+// fork: two choice cards under the HUD, with a bar running down to the auto-pick (↓)
+function drawForkPrompt(g, s){
+  const [hi, lo] = s.junction.opts, left = clamp((s.T - 3 - g.beat) / (s.T - 3 - s.L), 0, 1);
+  const cw = Math.min(260, (W - 48) / 2), ch = 64, y = 146, gap = 12, x0 = W / 2 - cw - gap / 2;
+  ctx.save(); ctx.textAlign = 'center';
+  ctx.font = '400 18px "Dela Gothic One", sans-serif'; ctx.fillStyle = C.ink; ctx.fillText('分かれ道 — ルートを選ぶ', W / 2, y - 12);
+  [[hi, 'up', C.amber, '↑'], [lo, 'down', C.lilac, '↓']].forEach(([r, dir, col, key], i) => {
+    const x = x0 + i * (cw + gap);
+    roundRect(x, y, cw, ch, 6); ctx.fillStyle = 'rgba(18,11,32,.88)'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = col; ctx.stroke();
+    ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x + 24, y + ch / 2, 15, 0, Math.PI * 2); ctx.fill(); arrow(x + 24, y + ch / 2, dir, 7, C.dark);
+    ctx.textAlign = 'left'; ctx.fillStyle = C.ink; ctx.font = `400 ${cw < 200 ? 14 : 17}px "Dela Gothic One", sans-serif`; ctx.fillText(r.jp, x + 46, y + 26);
+    ctx.fillStyle = C.muted; ctx.font = `700 ${cw < 200 ? 9 : 11}px "Zen Kaku Gothic New", sans-serif`;
+    const words = r.desc.split('・'), half = Math.ceil(words.length / 2);
+    ctx.fillText(words.slice(0, half).join('・'), x + 46, y + 42); ctx.fillText(words.slice(half).join('・'), x + 46, y + 56);
+  });
+  ctx.fillStyle = 'rgba(255,244,230,.15)'; ctx.fillRect(x0, y + ch + 8, cw * 2 + gap, 3);
+  ctx.fillStyle = C.lilac; ctx.fillRect(x0, y + ch + 8, (cw * 2 + gap) * left, 3);
+  ctx.textAlign = 'center'; ctx.font = '700 11px "JetBrains Mono", monospace'; ctx.fillStyle = C.muted;
+  ctx.fillText('選ばないと ↓ に進む', W / 2, y + ch + 26);
+  ctx.restore();
 }
 
 /* ---------------- flow ---------------- */
@@ -1695,7 +2058,9 @@ function startGame(stage, opts){
   if (bus) { try { bus.disconnect(); } catch(e){} }
   bus = actx.createGain(); bus.gain.value = 0.7 * SET.music; bus.connect(comp);
   stopSong();
+  RD = null; $('runDlg').hidden = true;
   G = makeGame(stage, false);
+  applyRunMods(G);   // resets the judgement windows outside a run
   let b0 = null;   // retry from a rooftop part-way: game beat at audio start
   if (opts.startSeg != null && stage.chart && stage.song) {
     let j = clamp(opts.startSeg - 1, 0, G.segs.length - 1);
@@ -1718,6 +2083,12 @@ function startGame(stage, opts){
   $('menu').hidden = true; $('over').hidden = true; $('pause').hidden = true; $('pauseBtn').hidden = false; $('pad').hidden = !padVisible(); placePad();
   cv.focus();
 }
+function startRun(){
+  const run = { area:1, areas:RUN_AREAS, hearts:3, maxHearts:3, coins:0, coinF:0, earned:0, relics:[], route:ROUTES.start, areaStart:0, areaLen:ROUTES.start.len,
+    helmetUsed:false, phoenixUsed:false, path:[], bonus:0 };
+  startGame({ id:'run', jp:'ルーフトップ・ラン', bpm:RUN_BPM[0], diff:0, seed:(Math.random() * 1e9) | 0, run }, { run:true });
+}
+const retryLast = () => lastOpts.run ? startRun() : startGame(lastStage, { ...lastOpts, startSeg:null });
 function gameOver(g){
   g.ended = true; g.running = false;
   const key = 'rb-best-' + g.stage.id, prev = store.get(key, 0), isNew = !g.auto && g.retryFrom == null && g.score > prev;
@@ -1732,6 +2103,17 @@ function gameOver(g){
   $('newBest').hidden = !isNew || g.score === 0;
   $('sGrades').innerHTML = Object.entries(g.counts).map(([k, v]) => `<div class="stat"><b style="font-size:18px">${v}</b><span>${k}</span></div>`).join('');
   if (g.auto) $('overTitle').textContent = g.clear ? 'オートで完走' : 'オートでも失敗';
+  const R = g.run;
+  $('overRun').hidden = !R;
+  if (R) {
+    const reached = g.clear ? R.areas : R.area;
+    if (reached > store.get('rb-run-area', 0)) store.set('rb-run-area', reached);
+    $('overStage').textContent = `ルーフトップ・ラン · ${Math.round(g.stage.bpm)} BPM`;
+    $('overTitle').textContent = g.clear ? 'RUN CLEAR' : '力尽きた';
+    $('overCause').textContent = g.clear ? `全${R.areas}エリアを走り抜けた（ボーナス +${R.bonus.toLocaleString()}）` : `${g.cause}（AREA ${R.area}/${R.areas}・${R.route.jp}）`;
+    $('overRunStat').innerHTML = `<span>到達 <b>AREA ${reached}/${R.areas}</b></span><span>コイン <b>${R.coins}</b>（稼いだ計 ${R.earned}）</span><span>ルート <b>${['スタート', ...R.path].join(' → ')}</b></span>`;
+    $('overRelics').innerHTML = R.relics.map(id => { const r = relicOf(id); return `<i title="${r.desc}">${r.ico} ${r.jp}</i>`; }).join('');
+  }
   $('toMenu').textContent = g.from === 'editor' ? 'エディタに戻る' : 'ステージ選択';
   lastFail = g.failSeg != null ? g.failSeg : null;
   const canHere = g.from === 'editor' && !g.clear && lastFail != null && !!g.stage.chart;
@@ -1771,28 +2153,32 @@ function toMenu(){
   stopSong();
   if (bus) { try { bus.disconnect(); } catch(e){} bus = null; }
   if (actx && actx.state === 'suspended') actx.resume();
-  paused = false;
+  paused = false; RD = null; $('runDlg').hidden = true; Object.assign(WIN, WIN_BASE);
   G = makeGame(STAGES.find(s => s.id === 'neon'), true); G.clock = demoClock(G);
   $('over').hidden = true; $('pause').hidden = true; $('pauseBtn').hidden = true; $('pad').hidden = true; $('menu').hidden = false;
   renderStages(); renderMine(); renderShared();
 }
 function setPause(on){
-  if (!G || G.demo || !G.running) return;
+  if (!G || G.demo || !G.running || RD) return;   // the reward dialog already holds the game
   paused = on;
   if (on) actx.suspend(); else actx.resume();
   $('pause').hidden = !on; $('pauseBtn').hidden = on; $('pad').hidden = on || !padVisible();
   if (on) $('resume').focus(); else cv.focus();
 }
 function renderStages(){
-  $('stages').innerHTML = STAGES.map((s, i) => {
+  const runArea = store.get('rb-run-area', 0);
+  $('stages').innerHTML = `<button class="stage run" data-run="1"><span class="bpm">RUN<small>ローグライク</small></span><span class="name">ルーフトップ・ラン</span><span class="desc">毎回ちがう屋上を${RUN_AREAS}エリア走り抜ける。ミスはハートで耐える（3つ）。エリアの間の分かれ道で ↑／↓ を押してルートを選び、レリック・闇市・回復で自分を強くしていく。エリアごとにテンポが上がる</span><span class="best">BEST ${store.get('rb-best-run', 0).toLocaleString()}${runArea ? ` · 最高到達 AREA ${runArea}/${RUN_AREAS}` : ''}</span></button>`
+    + STAGES.map((s, i) => {
     if (s.song && s.song.state === 'error') return '';   // song file not shipped with this copy (e.g. the public site): hide its stage
     const wait = s.song && s.song.state !== 'ready';
     const note = !s.song ? '' : s.song.state === 'error' ? '曲を読み込めませんでした' : wait ? '曲を読み込み中…' : '';
     return `<button class="stage${s.song ? ' song' : ''}" data-i="${i}"${wait ? ' disabled' : ''}><span class="bpm">${Math.round(s.bpm)}<small>BPM</small></span><span class="name">${s.jp}</span><span class="desc">${note || s.desc}</span><span class="best">BEST ${store.get('rb-best-' + s.id, 0).toLocaleString()}</span></button>`;
   }).join('');
 }
-$('stages').addEventListener('click', e => { const b = e.target.closest('.stage'); if (b && !b.disabled) startGame(STAGES[+b.dataset.i]); });
-$('retry').addEventListener('click', () => startGame(lastStage, { ...lastOpts, startSeg:null }));
+$('stages').addEventListener('click', e => { const b = e.target.closest('.stage'); if (b && !b.disabled) { if (b.dataset.run) startRun(); else startGame(STAGES[+b.dataset.i]); } });
+$('retry').addEventListener('click', retryLast);
+$('runCards').addEventListener('click', e => { const c = e.target.closest('.card'); if (c && !c.disabled) takeOffer(+c.dataset.i); });
+$('runGo').addEventListener('click', closeReward);
 $('retryHere').addEventListener('click', () => { if (lastFail != null) startGame(lastStage, { ...lastOpts, startSeg:lastFail }); });
 const leaveGame = () => lastOpts.from === 'editor' ? backToEditor() : toMenu();
 $('toMenu').addEventListener('click', leaveGame);
@@ -1924,8 +2310,9 @@ window.addEventListener('keydown', e => {
   if (!$('cal').hidden) { if (CAL.on && (e.code === 'Space' || keyDir(e.code))) { e.preventDefault(); if (!e.repeat) calTap(); } return; }
   if (!$('setDlg').hidden) { if (e.code === 'Escape') closeSettings(); return; }
   if (ED.open) return;
+  if (RD) { const m = /^(?:Digit|Numpad)([1-9])$/.exec(e.code); if (m) { e.preventDefault(); takeOffer(+m[1] - 1); } return; }   // reward dialog: 1–4 pick, buttons take Space/Enter
   if (e.code === 'Escape' || e.code === 'KeyP') { if (G && !G.demo && G.running) setPause(!paused); return; }
-  if (!$('over').hidden) { if (performance.now() - overAt > 600 && (e.code === 'Space' || e.code === 'Enter')) { e.preventDefault(); startGame(lastStage, { ...lastOpts, startSeg:null }); } return; }
+  if (!$('over').hidden) { if (performance.now() - overAt > 600 && (e.code === 'Space' || e.code === 'Enter')) { e.preventDefault(); retryLast(); } return; }
   const dir = keyDir(e.code);
   if (!dir || !G || G.demo || paused) return;
   e.preventDefault();
